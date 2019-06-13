@@ -10,3 +10,4 @@ add_definitions(-DPROJECT_ROOT="${CMAKE_HOME_DIRECTORY}/data/")
 
 
 add_subdirectory(src)
+add_subdirectory(editor)
