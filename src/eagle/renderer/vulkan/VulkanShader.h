@@ -3,7 +3,7 @@
 
 #include "VulkanCore.h"
 #include "eagle/renderer/Shader.h"
-#include "eagle/renderer/ShaderItemLayout.h"
+#include "eagle/renderer/vulkan/VulkanRenderTarget.h"
 
 _EAGLE_BEGIN
 
@@ -13,22 +13,16 @@ public:
 
     struct VulkanShaderCreateInfo {
         VkDevice device;
-        VkExtent2D extent;
-        VkRenderPass renderPass;
+        VkRenderPass* pRenderPass;
+        VkExtent2D* pExtent;
     };
+
+public:
 
     VulkanShader(const std::string &vertFileName, const std::string &fragFileName,
                  const VulkanShaderCreateInfo &createInfo);
 
     ~VulkanShader();
-
-    inline void set_vulkan_info(const VulkanShaderCreateInfo &info) { m_createInfo = info; }
-
-    void bind_command_buffer(VkCommandBuffer cmd);
-
-    virtual void bind() override;
-
-    virtual void compile() override;
 
     virtual void create_pipeline() override;
 
@@ -46,7 +40,7 @@ private:
 
     void create_descriptor_set_layout();
 
-    VkShaderModule create_shader_module(const std::vector<char> &code);
+    VkShaderModule create_shader_module(const std::vector<uint32_t> &code);
 
     VkDescriptorSetLayoutBinding create_descriptor_set_layout_binding(uint32_t binding,
                                                                       VkDescriptorType type,
@@ -59,14 +53,17 @@ private:
     VkVertexInputBindingDescription get_binding_description(const ShaderItemLayout& layout);
     std::vector<VkVertexInputAttributeDescription> get_attribute_descriptions(const ShaderItemLayout& layout);
 
-    VulkanShaderCreateInfo m_createInfo;
+private:
 
-    VkCommandBuffer m_cmd;
-
+    VulkanShaderCreateInfo m_info;
+    VkCommandBuffer m_commandBuffer;
     VkPipelineLayout m_pipelineLayout;
     VkPipeline m_graphicsPipeline;
     VkDescriptorSetLayout m_descriptorSetLayout;
     std::vector<VkDescriptorSetLayoutBinding> m_layoutBindings;
+    VkVertexInputBindingDescription m_inputBinding;
+    std::vector<VkVertexInputAttributeDescription> m_inputAttributes;
+    std::vector<uint32_t> m_vertShaderCode, m_fragShaderCode;
 
     bool m_cleared;
 

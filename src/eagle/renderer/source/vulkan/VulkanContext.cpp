@@ -11,6 +11,7 @@
 #include "eagle/core/Log.h"
 
 #include <GLFW/glfw3.h>
+#include <eagle/Eagle.h>
 
 
 _EAGLE_BEGIN
@@ -23,11 +24,10 @@ VulkanContext::VulkanContext() { // NOLINT(cppcoreguidelines-pro-type-member-ini
 
 VulkanContext::~VulkanContext() = default;
 
-void VulkanContext::init(Window* window) {
+void VulkanContext::init(Window *window) {
     EG_CORE_TRACE("Initializing vulkan context!");
 
     m_window = window;
-    m_eventListenerIdentifier = m_window->add_event_listener(BIND_EVENT_FN(VulkanContext::handle_event));
 
     create_instance();
     create_debug_callback();
@@ -37,170 +37,61 @@ void VulkanContext::init(Window* window) {
     create_swapchain();
     create_swapchain_images();
     create_render_pass();
-    create_framebuffers();
     create_command_pool();
     allocate_command_buffers();
+    create_framebuffers();
     create_sync_objects();
 
     EG_CORE_TRACE("Vulkan ready!");
-}
-
-void VulkanContext::handle_event(Event &e) {
-    EventDispatcher dispatcher(e);
-    dispatcher.dispatch<WindowResizedEvent>(BIND_EVENT_FN(VulkanContext::window_resized));
-}
-
-bool VulkanContext::window_resized(WindowResizedEvent& e) {
-    EG_CORE_TRACE("Vulkan received event of type WINDOW_RESIZED!");
-    m_windowResized = true;
-    return false;
 }
 
 void VulkanContext::deinit() {
 
     EG_CORE_TRACE("Terminating vulkan!");
 
-    VK_CALL vkDeviceWaitIdle(m_device);
+    VK_CALL
+    vkDeviceWaitIdle(m_device);
 
     m_vertexBuffers.clear();
     m_indexBuffers.clear();
 
     cleanup_swapchain();
     m_descriptorSets.clear();
+    m_dirtyUniformBuffers.clear();
     m_uniformBuffers.clear();
+    m_textures.clear();
+    m_renderTargets.clear();
     m_shaders.clear();
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VK_CALL vkDestroySemaphore(m_device, m_renderFinishedSemaphores[i], nullptr);
-        VK_CALL vkDestroySemaphore(m_device, m_imageAvailableSemaphores[i], nullptr);
-        VK_CALL vkDestroyFence(m_device, m_inFlightFences[i], nullptr);
+        VK_CALL
+        vkDestroySemaphore(m_device, m_renderFinishedSemaphores[i], nullptr);
+        VK_CALL
+        vkDestroySemaphore(m_device, m_imageAvailableSemaphores[i], nullptr);
+        VK_CALL
+        vkDestroyFence(m_device, m_inFlightFences[i], nullptr);
     }
 
-    VK_CALL vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+    VK_CALL
+    vkDestroyCommandPool(m_device, m_commandPool, nullptr);
 
-    VK_CALL vkDestroyDevice(m_device, nullptr);
+    VK_CALL
+    vkDestroyDevice(m_device, nullptr);
 
-    VK_CALL vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+    VK_CALL
+    vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
 
     if (enableValidationLayers) {
-        VK_CALL DestroyDebugUtilsMessengerEXT(m_instance, m_debugMessenger, nullptr);
+        VK_CALL
+        DestroyDebugUtilsMessengerEXT(m_instance, m_debugMessenger, nullptr);
     }
 
-    VK_CALL vkDestroyInstance(m_instance, nullptr);
-
-    m_window->remove_event_listener(m_eventListenerIdentifier);
+    VK_CALL
+    vkDestroyInstance(m_instance, nullptr);
 
     EG_CORE_TRACE("Vulkan terminated!");
 }
 
-
-void VulkanContext::begin_draw() {
-    m_drawInfo.invalidFrame = false;
-
-    VK_CALL vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, std::numeric_limits<uint64_t>::max());
-
-    VkResult result;
-    VK_CALL result = vkAcquireNextImageKHR(m_device, m_swapchain, std::numeric_limits<uint64_t>::max(), m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &m_drawInfo.imageIndex);
-
-    if (result == VK_ERROR_OUT_OF_DATE_KHR){
-        recreate_swapchain();
-        m_drawInfo.invalidFrame = true;
-        return;
-    } else if (result != VK_SUCCESS  && result != VK_SUBOPTIMAL_KHR){
-        throw std::runtime_error("failed to acquire swapchain image!");
-    }
-
-
-    VkCommandBufferBeginInfo beginInfo = {};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
-
-    VK_CALL_ASSERT(vkBeginCommandBuffer(m_commandBuffers[m_drawInfo.imageIndex], &beginInfo)) {
-        throw std::runtime_error("failed to begin recording command buffer!");
-    }
-
-    VkRenderPassBeginInfo renderPassInfo = {};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = m_renderPass;
-    renderPassInfo.framebuffer = m_framebuffers[m_drawInfo.imageIndex];
-    renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = m_swapchainExtent;
-
-    VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
-    renderPassInfo.clearValueCount = 1;
-    renderPassInfo.pClearValues = &clearColor;
-
-    VK_CALL vkCmdBeginRenderPass(m_commandBuffers[m_drawInfo.imageIndex], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-    m_drawInitialized = true;
-}
-
-void VulkanContext::end_draw() {
-    if (m_drawInfo.invalidFrame){
-        return;
-    }
-
-    VK_CALL vkCmdEndRenderPass(m_commandBuffers[m_drawInfo.imageIndex]);
-
-    m_drawInitialized = false;
-
-    VK_CALL_ASSERT(vkEndCommandBuffer(m_commandBuffers[m_drawInfo.imageIndex])) {
-        throw std::runtime_error("failed to record command buffer!");
-    }
-
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {m_imageAvailableSemaphores[m_currentFrame]};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &m_commandBuffers[m_drawInfo.imageIndex];
-
-    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_currentFrame]};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    VK_CALL vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
-
-    VK_CALL_ASSERT(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrame])) {
-        throw std::runtime_error("failed to submit draw_vertex_buffer command buffer!");
-    }
-}
-
-
-void VulkanContext::refresh() {
-    if (m_drawInfo.invalidFrame){
-        return;
-    }
-
-    VkPresentInfoKHR presentInfo = {};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
-    VkSemaphore waitSemaphores[] = {m_renderFinishedSemaphores[m_currentFrame]};
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = waitSemaphores;
-
-    VkSwapchainKHR swapChains[] = {m_swapchain};
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = swapChains;
-    presentInfo.pImageIndices = &m_drawInfo.imageIndex;
-
-    VK_CALL VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_windowResized){
-        m_windowResized = false;
-        recreate_swapchain();
-
-    } else if (result != VK_SUCCESS){
-        throw std::runtime_error("failed to present swapchain image!");
-    }
-
-    m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-}
 
 void VulkanContext::create_instance() {
 
@@ -233,11 +124,15 @@ void VulkanContext::create_instance() {
 
         debugCreateInfo = {};
         debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        debugCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        debugCreateInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugCreateInfo.messageSeverity =
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        debugCreateInfo.messageType =
+                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         debugCreateInfo.pfnUserCallback = debug_callback;
 
-        createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
+        createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT *) &debugCreateInfo;
     } else {
         createInfo.enabledLayerCount = 0;
 
@@ -259,12 +154,16 @@ void VulkanContext::create_debug_callback() {
 
     VkDebugUtilsMessengerCreateInfoEXT createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    createInfo.messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    createInfo.messageType =
+            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     createInfo.pfnUserCallback = debug_callback;
     createInfo.pUserData = &VkDebugInfo::get_last_call();
 
-    VK_CALL_ASSERT(CreateDebugUtilsMessengerEXT( m_instance, &createInfo, nullptr, &m_debugMessenger)){
+    VK_CALL_ASSERT(CreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger)) {
         throw std::runtime_error("failed to setup debug callback!");
     }
     EG_CORE_TRACE("Debug callback ready!");
@@ -273,7 +172,8 @@ void VulkanContext::create_debug_callback() {
 void VulkanContext::create_surface() {
 
     EG_CORE_TRACE("Creating window surface!");
-    VK_CALL_ASSERT(glfwCreateWindowSurface( m_instance, (GLFWwindow*) m_window->get_native_window(), nullptr, &m_surface)){
+    VK_CALL_ASSERT(
+            glfwCreateWindowSurface(m_instance, (GLFWwindow *) m_window->get_native_window(), nullptr, &m_surface)) {
         throw std::runtime_error("failed to create window surface!");
     }
     EG_CORE_TRACE("Window surface created!");
@@ -285,7 +185,8 @@ void VulkanContext::bind_physical_device() {
 
     //verifica quantas placas de video suportam a vulkan no pc
     uint32_t deviceCount = 0;
-    VK_CALL vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
+    VK_CALL
+    vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     EG_CORE_INFO_F("Number of supporting devices: {0}", deviceCount);
 
     //se n�o houver nenhuma placa de video que suporta, para o programa
@@ -295,12 +196,13 @@ void VulkanContext::bind_physical_device() {
 
     //lista todas as placas de video disponiveis
     std::vector<VkPhysicalDevice> devices(deviceCount);
-    VK_CALL vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
+    VK_CALL
+    vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
 
     //map usado pra rankear a melhor placa de video
     std::multimap<int, VkPhysicalDevice> candidates;
 
-    for (const auto& device : devices) {
+    for (const auto &device : devices) {
         //verifica a qualidade da placa de video
         int score = evaluate_device(device);
 
@@ -311,8 +213,7 @@ void VulkanContext::bind_physical_device() {
     //caso o score da melhor placa de video seja maior que zero, iremos utilizar ela
     if (candidates.rbegin()->first > 0) {
         m_physicalDevice = candidates.rbegin()->second;
-    }
-    else {
+    } else {
         //caso nenhuma preste
         throw std::runtime_error("no suitable GPU found!");
     }
@@ -325,10 +226,17 @@ int VulkanContext::evaluate_device(VkPhysicalDevice device) {
     EG_CORE_TRACE("Evaluating device!");
     VkPhysicalDeviceProperties physicalDeviceProperties = {};
 
-    VK_CALL vkGetPhysicalDeviceProperties(device, &physicalDeviceProperties);
+    VK_CALL
+    vkGetPhysicalDeviceProperties(device, &physicalDeviceProperties);
     //features
     VkPhysicalDeviceFeatures deviceFeatures = {};
-    VK_CALL vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+    VK_CALL
+    vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+    //samplers
+    if (!deviceFeatures.samplerAnisotropy) {
+        return 0;
+    }
 
     //se n�o tiver geometry shader, pula fora
     if (!deviceFeatures.geometryShader) {
@@ -339,7 +247,8 @@ int VulkanContext::evaluate_device(VkPhysicalDevice device) {
         return 0;
     }
 
-    if (!deviceFeatures.textureCompressionASTC_LDR && !deviceFeatures.textureCompressionETC2 && !deviceFeatures.textureCompressionBC) {
+    if (!deviceFeatures.textureCompressionASTC_LDR && !deviceFeatures.textureCompressionETC2 &&
+        !deviceFeatures.textureCompressionBC) {
         return 0;
     }
 
@@ -369,24 +278,27 @@ int VulkanContext::evaluate_device(VkPhysicalDevice device) {
 
     score += physicalDeviceProperties.limits.maxImageDimension2D;
 
+
     EG_CORE_TRACE_F("Device suitable! score:{0}", score);
 
     return score;
 }
 
 
-bool VulkanContext::validation_layers_supported(){
+bool VulkanContext::validation_layers_supported() {
     EG_CORE_TRACE("Checking validation layer support!");
     uint32_t layerCount;
-    VK_CALL vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    VK_CALL
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 
     std::vector<VkLayerProperties> availableLayers(layerCount);
-    VK_CALL vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+    VK_CALL
+    vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
-    for (const char* layerName : validationLayers) {
+    for (const char *layerName : validationLayers) {
         bool layerFound = false;
 
-        for (const auto& layerProperties : availableLayers) {
+        for (const auto &layerProperties : availableLayers) {
             if (strcmp(layerName, layerProperties.layerName) == 0) {
                 layerFound = true;
                 break;
@@ -403,10 +315,10 @@ bool VulkanContext::validation_layers_supported(){
 std::vector<const char *> VulkanContext::get_required_extensions() {
     EG_CORE_TRACE("Getting required extensions!");
     uint32_t glfwExtensionCount = 0;
-    const char** glfwExtensions;
+    const char **glfwExtensions;
     glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
-    std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    std::vector<const char *> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
     if (enableValidationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -416,14 +328,13 @@ std::vector<const char *> VulkanContext::get_required_extensions() {
 }
 
 
-
 VkBool32 VulkanContext::debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
                                        VkDebugUtilsMessageTypeFlagsEXT messageType,
                                        const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *pUserData) {
 
-    VkDebugInfo::VkCall info = *((VkDebugInfo::VkCall*)pUserData);
+    VkDebugInfo::VkCall info = *((VkDebugInfo::VkCall *) pUserData);
 
-    switch(messageSeverity){
+    switch (messageSeverity) {
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
             Log::core_log(info.fileName.c_str(), info.funcName.c_str(), info.line, Log::TRACE, pCallbackData->pMessage);
             break;
@@ -437,7 +348,8 @@ VkBool32 VulkanContext::debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT me
             Log::core_log(info.fileName.c_str(), info.funcName.c_str(), info.line, Log::ERR, pCallbackData->pMessage);
             break;
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_FLAG_BITS_MAX_ENUM_EXT:
-            Log::core_log(info.fileName.c_str(), info.funcName.c_str(), info.line, Log::CRITICAL, pCallbackData->pMessage);
+            Log::core_log(info.fileName.c_str(), info.funcName.c_str(), info.line, Log::CRITICAL,
+                          pCallbackData->pMessage);
             break;
     }
     return VK_FALSE;
@@ -448,16 +360,19 @@ VulkanContext::QueueFamilyIndices VulkanContext::find_family_indices(VkPhysicalD
     QueueFamilyIndices indices;
 
     uint32_t queueFamilyCount = 0;
-    VK_CALL vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+    VK_CALL
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
 
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-    VK_CALL vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+    VK_CALL
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
     int i = 0;
-    for (const auto& queueFamily : queueFamilies) {
+    for (const auto &queueFamily : queueFamilies) {
 
         VkBool32 presentSupport = false;
-        VK_CALL vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_surface, &presentSupport);
+        VK_CALL
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_surface, &presentSupport);
         if (queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
             indices.graphicsFamily = i;
         }
@@ -479,17 +394,19 @@ bool VulkanContext::check_device_extension_support(VkPhysicalDevice device) {
     EG_CORE_TRACE("Checking device extensions!");
 
     uint32_t extensionCount;
-    VK_CALL vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    VK_CALL
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
 
     //lista as extens�es disponiveis
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
-    VK_CALL vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+    VK_CALL
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
 
     std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
 
     //requiredExtensions possuiu todas as extens�es necess�rias
     //nesse loop n�s pegamos as extens�es que possuimos e retiramos elas do requiredExtensions
-    for (const auto& extension : availableExtensions) {
+    for (const auto &extension : availableExtensions) {
         requiredExtensions.erase(extension.extensionName);
     }
 
@@ -503,26 +420,31 @@ VulkanContext::SwapChainSupportDetails VulkanContext::query_swapchain_support(Vk
     EG_CORE_TRACE("Querying swapchain support!");
     SwapChainSupportDetails details;
 
-    VK_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, m_surface, &details.capabilities);
+    VK_CALL
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, m_surface, &details.capabilities);
 
     //Formats---------------------------------------
     uint32_t formatCount;
-    VK_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, nullptr);
+    VK_CALL
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, nullptr);
 
     if (formatCount != 0) {
         details.formats.resize(formatCount);
-        VK_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, details.formats.data());
+        VK_CALL
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, details.formats.data());
     }
     //----------------------------------------------
 
 
     //Presentation Modes----------------------------
     uint32_t presentModeCount;
-    VK_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_surface, &presentModeCount, nullptr);
+    VK_CALL
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_surface, &presentModeCount, nullptr);
 
     if (presentModeCount != 0) {
         details.presentModes.resize(presentModeCount);
-        VK_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_surface, &presentModeCount, details.presentModes.data());
+        VK_CALL
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_surface, &presentModeCount, details.presentModes.data());
     }
     //----------------------------------------------
     return details;
@@ -546,6 +468,7 @@ void VulkanContext::create_logical_device() {
     }
 
     VkPhysicalDeviceFeatures deviceFeatures = {};
+    deviceFeatures.samplerAnisotropy = VK_TRUE;
 
     VkDeviceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -565,12 +488,14 @@ void VulkanContext::create_logical_device() {
         createInfo.enabledLayerCount = 0;
     }
 
-    VK_CALL_ASSERT(vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device)){
+    VK_CALL_ASSERT(vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device)) {
         throw std::runtime_error("failed to create logical device!");
     }
 
-    VK_CALL vkGetDeviceQueue(m_device, indices.graphicsFamily.value(), 0, &m_graphicsQueue);
-    VK_CALL vkGetDeviceQueue(m_device, indices.presentFamily.value(), 0, &m_presentQueue);
+    VK_CALL
+    vkGetDeviceQueue(m_device, indices.graphicsFamily.value(), 0, &m_graphicsQueue);
+    VK_CALL
+    vkGetDeviceQueue(m_device, indices.presentFamily.value(), 0, &m_presentQueue);
 
     EG_CORE_TRACE("Logical device created!");
 }
@@ -582,8 +507,9 @@ VkSurfaceFormatKHR VulkanContext::choose_swap_surface_format(const std::vector<V
         return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     }
 
-    for (const auto& availableFormat : formats) {
-        if (availableFormat.format == VK_FORMAT_B8G8R8A8_UNORM && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+    for (const auto &availableFormat : formats) {
+        if (availableFormat.format == VK_FORMAT_B8G8R8A8_UNORM &&
+            availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             EG_CORE_INFO("Swapchain surface format: VK_FORMAT_B8G8R8A8_UNORM");
             return availableFormat;
         }
@@ -608,8 +534,8 @@ void VulkanContext::create_swapchain() {
     //verifica se a swap chain consegue gerar imagens de qualque tamanho e, caso n�o consiga, define qual vai ser o tamanho permitido
     VkExtent2D extent = choose_swap_extent(swapChainSupport.capabilities);
 
-    m_swapchainFormat = surfaceFormat.format;
-    m_swapchainExtent = extent;
+    m_present.swapchainFormat = surfaceFormat.format;
+    m_present.extent2D = extent;
 
     //caso maxImageCount seja 0, a queue da swapchain suporta qualquer quantidade de imagens
     uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
@@ -630,14 +556,14 @@ void VulkanContext::create_swapchain() {
     //-----------------------------
 
     QueueFamilyIndices indices = find_family_indices(m_physicalDevice);
-    uint32_t queueFamilyIndices[] = { (uint32_t)indices.graphicsFamily.value(), (uint32_t)indices.presentFamily.value() };
+    uint32_t queueFamilyIndices[] = {(uint32_t) indices.graphicsFamily.value(),
+                                     (uint32_t) indices.presentFamily.value()};
 
     if (indices.graphicsFamily != indices.presentFamily) {
         createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         createInfo.queueFamilyIndexCount = 2;
         createInfo.pQueueFamilyIndices = queueFamilyIndices;
-    }
-    else {
+    } else {
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         createInfo.queueFamilyIndexCount = 0; // Optional
         createInfo.pQueueFamilyIndices = nullptr; // Optional
@@ -652,46 +578,49 @@ void VulkanContext::create_swapchain() {
 
     createInfo.oldSwapchain = VK_NULL_HANDLE;
 
-    VK_CALL_ASSERT(vkCreateSwapchainKHR(m_device, &createInfo, nullptr, &m_swapchain)) {
+    VK_CALL_ASSERT(vkCreateSwapchainKHR(m_device, &createInfo, nullptr, &m_present.swapchain)) {
         throw std::runtime_error("failed to create swap chain!");
     }
 
     //query da quantidade de imagens
-    VK_CALL vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, nullptr);
-    m_swapchainImages.resize(imageCount);
+    VK_CALL
+    vkGetSwapchainImagesKHR(m_device, m_present.swapchain, &imageCount, nullptr);
+    m_present.swapchainImages.resize(imageCount);
 
-    EG_CORE_INFO_F("Number of swapchain images: {0}", m_swapchainImages.size());
+    EG_CORE_INFO_F("Number of swapchain images: {0}", m_present.swapchainImages.size());
 
     //efetivamente pega as imagens
-    VK_CALL vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, m_swapchainImages.data());
+    VK_CALL
+    vkGetSwapchainImagesKHR(m_device, m_present.swapchain, &imageCount, m_present.swapchainImages.data());
     EG_CORE_TRACE("Swapchain created!");
 }
 
 VkPresentModeKHR VulkanContext::choose_swap_present_mode(const std::vector<VkPresentModeKHR> &presentModes) {
     VkPresentModeKHR bestMode = VK_PRESENT_MODE_FIFO_KHR;
-    for (const auto& availablePresentMode : presentModes) {
+    for (const auto &availablePresentMode : presentModes) {
         if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
             EG_CORE_INFO("Swapchain present mode: VK_PRESENT_MODE_MAILBOX_KHR");
             return availablePresentMode;
-        }
-        else if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+        } else if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
             EG_CORE_INFO("Swapchain present mode: VK_PRESENT_MODE_IMMEDIATE_KHR");
             bestMode = availablePresentMode;
         }
     }
     EG_CORE_INFO("Swapchain present mode: VK_PRESENT_MODE_FIFO_KHR");
-    return  bestMode;
+    return bestMode;
 }
 
 VkExtent2D VulkanContext::choose_swap_extent(const VkSurfaceCapabilitiesKHR &capabilities) {
     if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
-        EG_CORE_INFO_F("Swap extent: width:{0} height:{1}", capabilities.currentExtent.width, capabilities.currentExtent.height);
+        EG_CORE_INFO_F("Swap extent: width:{0} height:{1}", capabilities.currentExtent.width,
+                       capabilities.currentExtent.height);
         return capabilities.currentExtent;
-    }
-    else {
+    } else {
         VkExtent2D actualExtent = {};
-        actualExtent.width = std::clamp<uint32_t>(m_window->get_width(),capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-        actualExtent.height = std::clamp<uint32_t>(m_window->get_height(),capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+        actualExtent.width = std::clamp<uint32_t>(m_window->get_width(), capabilities.minImageExtent.width,
+                                                  capabilities.maxImageExtent.width);
+        actualExtent.height = std::clamp<uint32_t>(m_window->get_height(), capabilities.minImageExtent.height,
+                                                   capabilities.maxImageExtent.height);
 
         EG_CORE_INFO_F("Swap extent: width:{0} height:{1}", actualExtent.width, actualExtent.height);
         return actualExtent;
@@ -701,7 +630,7 @@ VkExtent2D VulkanContext::choose_swap_extent(const VkSurfaceCapabilitiesKHR &cap
 void VulkanContext::create_swapchain_images() {
     EG_CORE_INFO("Create swapchain images!");
 
-    m_swapchainImageViews.resize(m_swapchainImages.size());
+    m_present.swapchainImageViews.resize(m_present.swapchainImages.size());
 
     VkImageSubresourceRange subresourceRange = {};
     subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -710,11 +639,12 @@ void VulkanContext::create_swapchain_images() {
     subresourceRange.baseArrayLayer = 0;
     subresourceRange.layerCount = 1;
 
-    for (size_t i = 0; i < m_swapchainImageViews.size(); i++) {
-        m_swapchainImageViews[i] = VulkanHelper::create_image_view(
+    for (size_t i = 0; i < m_present.swapchainImageViews.size(); i++) {
+        VulkanHelper::create_image_view(
                 m_device,
-                m_swapchainImages[i],
-                m_swapchainFormat,
+                m_present.swapchainImages[i],
+                m_present.swapchainImageViews[i],
+                m_present.swapchainFormat,
                 VK_IMAGE_VIEW_TYPE_2D,
                 subresourceRange
         );
@@ -723,11 +653,69 @@ void VulkanContext::create_swapchain_images() {
     EG_CORE_INFO("Swapchain images created!");
 }
 
+void VulkanContext::handle_window_resized(int width, int height) {
+    m_windowResized = true;
+}
+
+void VulkanContext::create_depth_resources() {
+//    VkFormat depthFormat = find_depth_format();
+//
+//    VulkanHelper::create_image(m_physicalDevice, m_device,
+//                               m_present.extent2D.width, m_present.extent2D.height, 1, 1,
+//                               depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+//                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
+//
+//    VkImageSubresourceRange subresourceRange = {};
+//    subresourceRange.layerCount = 1;
+//    subresourceRange.baseArrayLayer = 0;
+//    subresourceRange.baseMipLevel = 0;
+//    subresourceRange.levelCount = 1;
+//    subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+//
+//    auto has_stencil_component = [&](VkFormat format) {
+//        return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+//    };
+//
+//    if (has_stencil_component(depthFormat)) {
+//        subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+//    }
+//
+//    VulkanHelper::create_image_view(m_device, m_depthImage, m_depthImageView, depthFormat,
+//                                    VK_IMAGE_VIEW_TYPE_2D, subresourceRange);
+//
+//
+//    VulkanHelper::transition_image_layout(m_device, m_commandPool, m_graphicsQueue,
+//                                          m_depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED,
+//                                          VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, subresourceRange);
+}
+
+VkFormat VulkanContext::find_supported_format(const std::vector<VkFormat> &candidates, VkImageTiling tiling,
+                                              VkFormatFeatureFlags features) {
+    for (VkFormat format : candidates) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(m_physicalDevice, format, &props);
+
+        if (tiling == VK_IMAGE_TILING_LINEAR && (props.linearTilingFeatures & features) == features) {
+            return format;
+        } else if (tiling == VK_IMAGE_TILING_OPTIMAL && (props.optimalTilingFeatures & features) == features) {
+            return format;
+        }
+    }
+    throw std::runtime_error("failed to find supported format!");
+}
+
+VkFormat VulkanContext::find_depth_format() {
+    return find_supported_format({VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
+                                 VK_IMAGE_TILING_OPTIMAL,
+                                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+}
+
+
 void VulkanContext::create_render_pass() {
 
     EG_CORE_TRACE("Creating render pass!");
     VkAttachmentDescription colorAttachment = {};
-    colorAttachment.format = m_swapchainFormat;
+    colorAttachment.format = m_present.swapchainFormat;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -753,16 +741,18 @@ void VulkanContext::create_render_pass() {
     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
+
+    std::array<VkAttachmentDescription, 1> attachments = {colorAttachment};
     VkRenderPassCreateInfo renderPassInfo = {};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.attachmentCount = attachments.size();
+    renderPassInfo.pAttachments = attachments.data();
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
     renderPassInfo.dependencyCount = 1;
     renderPassInfo.pDependencies = &dependency;
 
-    VK_CALL_ASSERT(vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass)) {
+    VK_CALL_ASSERT(vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_present.renderPass)) {
         throw std::runtime_error("failed to create render pass!");
     }
 
@@ -791,25 +781,25 @@ void VulkanContext::create_framebuffers() {
 
     EG_CORE_TRACE("Creating framebuffers!");
 
-    m_framebuffers.resize(m_swapchainImages.size());
+    m_present.framebuffers.resize(m_present.swapchainImages.size());
 
-    EG_CORE_INFO_F("Number of framebuffers: {0}", m_framebuffers.size());
+    EG_CORE_INFO_F("Number of framebuffers: {0}", m_present.framebuffers.size());
 
-    for (size_t i = 0; i < m_swapchainImageViews.size(); i++) {
-        VkImageView attachments[] = {
-                m_swapchainImageViews[i]
+    for (size_t i = 0; i < m_present.swapchainImageViews.size(); i++) {
+        std::array<VkImageView, 1> attachments = {
+                m_present.swapchainImageViews[i]
         };
 
         VkFramebufferCreateInfo framebufferInfo = {};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = m_renderPass;
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = attachments;
-        framebufferInfo.width = m_swapchainExtent.width;
-        framebufferInfo.height = m_swapchainExtent.height;
+        framebufferInfo.renderPass = m_present.renderPass;
+        framebufferInfo.attachmentCount = attachments.size();
+        framebufferInfo.pAttachments = attachments.data();
+        framebufferInfo.width = m_present.extent2D.width;
+        framebufferInfo.height = m_present.extent2D.height;
         framebufferInfo.layers = 1;
 
-        VK_CALL_ASSERT(vkCreateFramebuffer(m_device, &framebufferInfo, nullptr, &m_framebuffers[i])) {
+        VK_CALL_ASSERT(vkCreateFramebuffer(m_device, &framebufferInfo, nullptr, &m_present.framebuffers[i])) {
             throw std::runtime_error("failed to create framebuffer!");
         }
     }
@@ -820,7 +810,7 @@ void VulkanContext::allocate_command_buffers() {
 
     EG_CORE_TRACE("Allocating primary command buffers!");
 
-    m_commandBuffers.resize(m_swapchainImages.size());
+    m_commandBuffers.resize(m_present.swapchainImages.size());
     VkCommandBufferAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = m_commandPool;
@@ -850,9 +840,10 @@ void VulkanContext::create_sync_objects() {
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VK_CALL if (vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS ||
-                    vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_renderFinishedSemaphores[i]) != VK_SUCCESS ||
-                    vkCreateFence(m_device, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS) {
+        VK_CALL
+        if (vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS ||
+            vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_renderFinishedSemaphores[i]) != VK_SUCCESS ||
+            vkCreateFence(m_device, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS) {
 
             throw std::runtime_error("failed to create sync objects for a frame!");
         }
@@ -865,10 +856,11 @@ void VulkanContext::create_sync_objects() {
 void VulkanContext::recreate_swapchain() {
     EG_CORE_TRACE("Recreating swapchain!");
 
-    VK_CALL vkDeviceWaitIdle(m_device);
+    VK_CALL
+    vkDeviceWaitIdle(m_device);
 
     //Waits until window is visible
-    while(m_window->is_minimized()){
+    while (m_window->is_minimized()) {
         m_window->wait_native_events();
     }
 
@@ -877,24 +869,23 @@ void VulkanContext::recreate_swapchain() {
     create_swapchain();
     create_swapchain_images();
     create_render_pass();
-    create_framebuffers();
     allocate_command_buffers();
+    create_depth_resources();
+    create_framebuffers();
 
-    VulkanShader::VulkanShaderCreateInfo createInfo = {};
-    createInfo.device = m_device;
-    createInfo.extent = m_swapchainExtent;
-    createInfo.renderPass = m_renderPass;
+    for (auto& renderTarget : m_renderTargets){
+        renderTarget->create(m_present.extent2D.width, m_present.extent2D.height);
+    }
 
-    for (auto& shader : m_shaders){
-        shader->set_vulkan_info(createInfo);
+    for (auto &shader : m_shaders) {
         shader->create_pipeline();
     }
 
-    for (auto& uniformBuffer : m_uniformBuffers){
+    for (auto &uniformBuffer : m_uniformBuffers) {
         uniformBuffer->create_uniform_buffer();
     }
 
-    for (auto& descriptorSet : m_descriptorSets){
+    for (auto &descriptorSet : m_descriptorSets) {
         descriptorSet->create_descriptor_pool();
         descriptorSet->create_descriptor_sets();
     }
@@ -903,50 +894,76 @@ void VulkanContext::recreate_swapchain() {
 }
 
 void VulkanContext::cleanup_swapchain() {
-    EG_TRACE("Clearing swapchain!");
+    EG_CORE_TRACE("Clearing swapchain!");
 
-    for (size_t i = 0; i < m_framebuffers.size(); i++){
-        VK_CALL vkDestroyFramebuffer(m_device, m_framebuffers[i], nullptr);
+
+    for (size_t i = 0; i < m_present.framebuffers.size(); i++) {
+        VK_CALL
+        vkDestroyFramebuffer(m_device, m_present.framebuffers[i], nullptr);
     }
 
-    VK_CALL vkFreeCommandBuffers(m_device, m_commandPool, static_cast<uint32_t>(m_commandBuffers.size()), m_commandBuffers.data());
+    VK_CALL
+    vkFreeCommandBuffers(m_device, m_commandPool, static_cast<uint32_t>(m_commandBuffers.size()),
+                         m_commandBuffers.data());
 
-    for (auto& descriptorSet : m_descriptorSets){
+    for (auto &descriptorSet : m_descriptorSets) {
         descriptorSet->cleanup();
     }
 
-    for (auto& uniformBuffer : m_uniformBuffers){
+    for (auto &uniformBuffer : m_uniformBuffers) {
         uniformBuffer->cleanup();
     }
 
-    for (auto& shader : m_shaders){
+    for (auto &shader : m_shaders) {
         shader->cleanup_pipeline();
     }
 
-    VK_CALL vkDestroyRenderPass(m_device, m_renderPass, nullptr);
-
-    for (size_t i = 0; i < m_swapchainImageViews.size(); i++){
-        VK_CALL vkDestroyImageView(m_device, m_swapchainImageViews[i], nullptr);
+    for (auto& renderTarget : m_renderTargets){
+        renderTarget->cleanup();
     }
 
-    VK_CALL vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
-    EG_TRACE("Swapchain cleared!");
+    VK_CALL
+    vkDestroyRenderPass(m_device, m_present.renderPass, nullptr);
+
+    for (size_t i = 0; i < m_present.swapchainImageViews.size(); i++) {
+        VK_CALL
+        vkDestroyImageView(m_device, m_present.swapchainImageViews[i], nullptr);
+    }
+
+    VK_CALL
+    vkDestroySwapchainKHR(m_device, m_present.swapchain, nullptr);
+    EG_CORE_TRACE("Swapchain cleared!");
 }
 
 std::weak_ptr<Shader>
 VulkanContext::handle_create_shader(const std::string &vertFilePath, const std::string &fragFilePath) {
-    EG_TRACE("Creating a vulkan shader!");
+    EG_CORE_TRACE("Creating a vulkan shader!");
     VulkanShader::VulkanShaderCreateInfo createInfo = {};
     createInfo.device = m_device;
-    createInfo.extent = m_swapchainExtent;
-    createInfo.renderPass = m_renderPass;
+    createInfo.pExtent = &m_present.extent2D;
+    createInfo.pRenderPass = &m_present.renderPass;
+    m_shaders.emplace_back(std::make_shared<VulkanShader>(vertFilePath, fragFilePath, createInfo));
+    return m_shaders.back();
+}
+
+std::weak_ptr<Shader>
+VulkanContext::handle_create_shader(const std::string &vertFilePath, const std::string &fragFilePath,
+                                    std::shared_ptr<RenderTarget> renderTarget) {
+    EG_CORE_TRACE("Creating a vulkan shader for a render target!");
+
+    auto vkRenderTarget = std::static_pointer_cast<VulkanRenderTarget>(renderTarget);
+
+    VulkanShader::VulkanShaderCreateInfo createInfo = {};
+    createInfo.device = m_device;
+    createInfo.pRenderPass = &vkRenderTarget->get_render_pass();
+    createInfo.pExtent = &vkRenderTarget->get_extent();
     m_shaders.emplace_back(std::make_shared<VulkanShader>(vertFilePath, fragFilePath, createInfo));
     return m_shaders.back();
 }
 
 std::weak_ptr<VertexBuffer>
 VulkanContext::handle_create_vertex_buffer(std::vector<float> &vertices, size_t stride) {
-    EG_TRACE("Creating a vulkan vertex buffer!");
+    EG_CORE_TRACE("Creating a vulkan vertex buffer!");
     VulkanVertexBufferCreateInfo createInfo = {};
     createInfo.vertices = std::move(vertices);
     createInfo.stride = stride;
@@ -959,7 +976,7 @@ VulkanContext::handle_create_vertex_buffer(std::vector<float> &vertices, size_t 
 
 std::weak_ptr<IndexBuffer>
 VulkanContext::handle_create_index_buffer(std::vector<uint32_t> &indices) {
-    EG_TRACE("Creating a vulkan index buffer!");
+    EG_CORE_TRACE("Creating a vulkan index buffer!");
     VulkanIndexBufferCreateInfo createInfo = {};
     createInfo.graphicsQueue = m_graphicsQueue;
     createInfo.physicalDevice = m_physicalDevice;
@@ -970,64 +987,127 @@ VulkanContext::handle_create_index_buffer(std::vector<uint32_t> &indices) {
 }
 
 std::weak_ptr<UniformBuffer>
-VulkanContext::handle_create_uniform_buffer(const ShaderItemLayout &layout) {
+VulkanContext::handle_create_uniform_buffer(size_t size) {
+    EG_CORE_TRACE("Creating a vulkan uniform buffer!");
     VulkanUniformBufferCreateInfo createInfo = {};
     createInfo.device = m_device;
     createInfo.physicalDevice = m_physicalDevice;
-    createInfo.bufferCount = m_swapchainImages.size();
-    m_uniformBuffers.emplace_back(std::make_shared<VulkanUniformBuffer>(createInfo, layout));
+    createInfo.bufferCount = m_present.swapchainImages.size();
+    m_uniformBuffers.emplace_back(std::make_shared<VulkanUniformBuffer>(createInfo, size));
     return m_uniformBuffers.back();
 }
 
 std::weak_ptr<DescriptorSet>
 VulkanContext::handle_create_descriptor_set(std::shared_ptr<Shader> shader,
-                                            const std::vector<std::shared_ptr<UniformBuffer>> &uniformBuffers) {
+                                            const std::vector<std::shared_ptr<UniformBuffer>> &uniformBuffers,
+                                            const std::vector<std::shared_ptr<Image>> &images) {
+    EG_CORE_TRACE("Creating a vulkan descriptor set!");
     VulkanDescriptorSetCreateInfo createInfo = {};
     createInfo.device = m_device;
-    createInfo.bufferCount = m_swapchainImages.size();
+    createInfo.bufferCount = m_present.swapchainImages.size();
     std::vector<std::shared_ptr<VulkanUniformBuffer>> vulkanUniformBuffers(uniformBuffers.size());
-    for (size_t i = 0; i < uniformBuffers.size(); i++){
+    for (size_t i = 0; i < uniformBuffers.size(); i++) {
         vulkanUniformBuffers[i] = std::static_pointer_cast<VulkanUniformBuffer>(uniformBuffers[i]);
     }
-    m_descriptorSets.emplace_back(std::make_shared<VulkanDescriptorSet>(std::static_pointer_cast<VulkanShader>(shader), vulkanUniformBuffers, createInfo));
+
+    std::vector<std::shared_ptr<VulkanImage>> vulkanImages(images.size());
+    for (size_t i = 0; i < images.size(); i++) {
+        vulkanImages[i] = std::static_pointer_cast<VulkanImage>(images[i]);
+    }
+    m_descriptorSets.emplace_back(
+            std::make_shared<VulkanDescriptorSet>(std::static_pointer_cast<VulkanShader>(shader), vulkanUniformBuffers,
+                                                  vulkanImages, createInfo));
     return m_descriptorSets.back();
+}
+
+std::weak_ptr<Texture2D>
+VulkanContext::handle_create_texture_2d(const std::string &filePath) {
+
+    EG_CORE_TRACE("Creating a vulkan texture!");
+    Texture2DCreateInfo textureInfo = Texture2D::load_texture(filePath);
+
+    VulkanTexture2DCreateInfo vulkanTextureCreateInfo = {};
+    vulkanTextureCreateInfo.device = m_device;
+    vulkanTextureCreateInfo.physicalDevice = m_physicalDevice;
+    vulkanTextureCreateInfo.commandPool = m_commandPool;
+    vulkanTextureCreateInfo.graphicsQueue = m_graphicsQueue;
+
+    m_textures.emplace_back(std::make_shared<VulkanTexture2D>(textureInfo, vulkanTextureCreateInfo));
+    return m_textures.back();
+}
+
+std::weak_ptr<RenderTarget> VulkanContext::handle_create_render_target() {
+
+    VulkanRenderTargetCreateInfo createInfo = {};
+    createInfo.device = m_device;
+    createInfo.physicalDevice = m_physicalDevice;
+    createInfo.depthFormat = find_depth_format();
+    createInfo.colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    m_renderTargets.emplace_back(std::make_shared<VulkanRenderTarget>(m_present.extent2D.width, m_present.extent2D.height, createInfo));
+    return m_renderTargets.back();
+}
+
+void
+VulkanContext::handle_uniform_buffer_flush(std::shared_ptr<UniformBuffer> uniformBuffer, void *data) {
+
+    std::shared_ptr<VulkanUniformBuffer> vulkanUniformBuffer = std::static_pointer_cast<VulkanUniformBuffer>(
+            uniformBuffer);
+    vulkanUniformBuffer->upload_data(data);
+    if (std::find(m_dirtyUniformBuffers.begin(), m_dirtyUniformBuffers.end(), vulkanUniformBuffer) ==
+        m_dirtyUniformBuffers.end()) {
+        m_dirtyUniformBuffers.emplace_back(vulkanUniformBuffer);
+    }
 }
 
 void
 VulkanContext::handle_draw_vertex_buffer(std::shared_ptr<VertexBuffer> vertexBuffer) {
 
-    if (!m_drawInitialized){
+    if (!m_drawInitialized) {
         EG_CORE_ERROR("Draw vertex buffer called outside of draw range!");
         return;
     }
 
     std::shared_ptr<VulkanVertexBuffer> vulkanVertexBuffer = std::static_pointer_cast<VulkanVertexBuffer>(vertexBuffer);
 
-    VkBuffer buffers[] = {vulkanVertexBuffer->get_buffer().get_native_buffer()};
-    VkDeviceSize offsets[] = {0};
+    auto bindVertexCmd = std::make_shared<VulkanCommandBindVertexBuffer>(m_present.commandBuffer, vulkanVertexBuffer->get_buffer().get_native_buffer());
+    auto drawCmd = std::make_shared<VulkanCommandDraw>(m_present.commandBuffer, vulkanVertexBuffer->get_vertices_count());
 
-    VK_CALL vkCmdBindVertexBuffers(m_commandBuffers[m_drawInfo.imageIndex], 0, 1, buffers, offsets);
-    VK_CALL vkCmdDraw(m_commandBuffers[m_drawInfo.imageIndex], vulkanVertexBuffer->get_vertices_count(), 1, 0, 0);
+    if (m_recordingFirstPass){
+        size_t index = m_firstPassCommands.size();
+        m_firstPassCommands.resize(index + 2);
+        m_firstPassCommands[index]     = bindVertexCmd;
+        m_firstPassCommands[index + 1] = drawCmd;
+    } else {
+        size_t index = m_secondPassCommands.size();
+        m_secondPassCommands.resize(index + 2);
+        m_secondPassCommands[index]     = bindVertexCmd;
+        m_secondPassCommands[index + 1] = drawCmd;
+    }
 }
 
 void
 VulkanContext::handle_bind_shader(std::shared_ptr<Shader> shader) {
 
-    if (!m_drawInitialized){
+    if (!m_drawInitialized) {
         EG_CORE_ERROR("Bind shader called outside of draw range!");
         return;
     }
 
     std::shared_ptr<VulkanShader> vulkanShader = std::static_pointer_cast<VulkanShader>(shader);
 
-    vulkanShader->bind_command_buffer(m_commandBuffers[m_drawInfo.imageIndex]);
-    vulkanShader->bind();
+    auto cmd = std::make_shared<VulkanCommandBindShader>(m_present.commandBuffer, vulkanShader->get_pipeline());
+
+    if (m_recordingFirstPass){
+        m_firstPassCommands.emplace_back(cmd);
+    } else {
+        m_secondPassCommands.emplace_back(cmd);
+    }
 }
 
 void
-VulkanContext::handle_draw_indexed_vertex_buffer(std::shared_ptr<VertexBuffer> vertexBuffer,
-                                                 std::shared_ptr<IndexBuffer> indexBuffer) {
-    if (!m_drawInitialized){
+VulkanContext::handle_draw_indexed(std::shared_ptr<VertexBuffer> vertexBuffer,
+                                   std::shared_ptr<IndexBuffer> indexBuffer) {
+    if (!m_drawInitialized) {
         EG_CORE_ERROR("Draw indexed vertex buffer called outside of draw range!");
         return;
     }
@@ -1035,42 +1115,207 @@ VulkanContext::handle_draw_indexed_vertex_buffer(std::shared_ptr<VertexBuffer> v
 
     std::shared_ptr<VulkanIndexBuffer> vulkanIndexBuffer = std::static_pointer_cast<VulkanIndexBuffer>(indexBuffer);
 
-    VkBuffer vertexBuffers[] = {vulkanVertexBuffer->get_buffer().get_native_buffer()};
-    VkDeviceSize offsets[] = {0};
+    auto bindVertexCmd = std::make_shared<VulkanCommandBindVertexBuffer>(m_present.commandBuffer, vulkanVertexBuffer->get_buffer().get_native_buffer());
+    auto bindIndexCmd = std::make_shared<VulkanCommandBindIndexBuffer>(m_present.commandBuffer, vulkanIndexBuffer->get_buffer().get_native_buffer());
+    auto drawIndexedCmd = std::make_shared<VulkanCommandDrawIndexed>(m_present.commandBuffer, vulkanIndexBuffer->get_indices_count());
 
-    VK_CALL vkCmdBindVertexBuffers(m_commandBuffers[m_drawInfo.imageIndex], 0, 1, vertexBuffers, offsets);
-
-    VK_CALL vkCmdBindIndexBuffer(m_commandBuffers[m_drawInfo.imageIndex], vulkanIndexBuffer->get_buffer().get_native_buffer(), 0, VK_INDEX_TYPE_UINT32);
-
-    VK_CALL vkCmdDrawIndexed(m_commandBuffers[m_drawInfo.imageIndex], vulkanIndexBuffer->get_indices_count(), 1, 0, 0, 0);
-
+    if (m_recordingFirstPass){
+        size_t index = m_firstPassCommands.size();
+        m_firstPassCommands.resize(m_firstPassCommands.size() + 3);
+        m_firstPassCommands[index]     = bindVertexCmd;
+        m_firstPassCommands[index + 1] = bindIndexCmd;
+        m_firstPassCommands[index + 2] = drawIndexedCmd;
+    }
+    else{
+        size_t index = m_secondPassCommands.size();
+        m_secondPassCommands.resize(m_secondPassCommands.size() + 3);
+        m_secondPassCommands[index]     = bindVertexCmd;
+        m_secondPassCommands[index + 1] = bindIndexCmd;
+        m_secondPassCommands[index + 2] = drawIndexedCmd;
+    }
 }
 
 void
 VulkanContext::handle_bind_descriptor_set(std::shared_ptr<DescriptorSet> descriptorSet) {
 
-    if (!m_drawInitialized){
-        EG_CORE_ERROR("Draw vertex buffer called outside of draw range!");
+    if (!m_drawInitialized) {
+        EG_CORE_ERROR("bind descriptor called outside of draw range!");
         return;
     }
 
-    std::shared_ptr<VulkanDescriptorSet> vulkanDescriptorSet = std::static_pointer_cast<VulkanDescriptorSet>(descriptorSet);
+    std::shared_ptr<VulkanDescriptorSet> vulkanDescriptorSet = std::static_pointer_cast<VulkanDescriptorSet>(
+            descriptorSet);
 
-    VulkanDescriptorSetDrawInfo info = {};
-    info.bufferIndex = m_drawInfo.imageIndex;
-    info.commandBuffer = m_commandBuffers[m_drawInfo.imageIndex];
-    vulkanDescriptorSet->set_draw_info(info);
-    vulkanDescriptorSet->bind();
+    auto cmd = std::make_shared<VulkanCommandBindDescriptorSet>(
+            m_present.commandBuffer,
+            vulkanDescriptorSet->get_shader().lock()->get_layout(),
+            vulkanDescriptorSet->get_descriptors()[m_drawInfo.imageIndex]
+            );
+    if (m_recordingFirstPass)
+        m_firstPassCommands.emplace_back(cmd);
+    else
+        m_secondPassCommands.emplace_back(cmd);
+
 }
 
-void VulkanContext::handle_flush_uniform_buffer_data(std::shared_ptr<UniformBuffer> uniformBuffer, void *data) {
+bool VulkanContext::begin_draw_commands() {
 
-    if (!m_drawInitialized){
-        EG_CORE_ERROR("Draw vertex buffer called outside of draw range!");
-        return;
+    VK_CALL
+    vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, std::numeric_limits<uint64_t>::max());
+
+    VkResult result;
+    VK_CALL
+    result = vkAcquireNextImageKHR(m_device, m_present.swapchain, std::numeric_limits<uint64_t>::max(),
+                                   m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &m_drawInfo.imageIndex);
+
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreate_swapchain();
+        return false;
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        throw std::runtime_error("failed to acquire swapchain image!");
     }
-    std::shared_ptr<VulkanUniformBuffer> vulkanUniformBuffer = std::static_pointer_cast<VulkanUniformBuffer>(uniformBuffer);
-    vulkanUniformBuffer->flush(data, m_drawInfo.imageIndex);
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+
+    //get the correct commandbuffer for this layer (current image + layer offset in the commandbuffer vector)
+    m_present.commandBuffer = m_commandBuffers[m_drawInfo.imageIndex];
+
+    VK_CALL_ASSERT(vkBeginCommandBuffer(m_commandBuffers[m_drawInfo.imageIndex], &beginInfo)) {
+        throw std::runtime_error("failed to begin recording command buffer!");
+    }
+    m_drawInitialized = true;
+
+    return true;
+}
+
+void VulkanContext::end_draw_commands() {
+
+    //first pass, so we guarantee that all custom render targets will be renderer first
+    for (auto& cmd : m_firstPassCommands){
+        cmd->operator()();
+    }
+
+    std::array<VkClearValue, 1> clearValues = {};
+    clearValues[0].color = {0.0f, 0.0f, 0.0f, 1.0f};
+
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = m_present.renderPass;
+    renderPassInfo.framebuffer = m_present.framebuffers[m_drawInfo.imageIndex];
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = m_present.extent2D;
+    renderPassInfo.clearValueCount = clearValues.size();
+    renderPassInfo.pClearValues = clearValues.data();
+
+    VK_CALL vkCmdBeginRenderPass(m_present.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    for (auto& cmd : m_secondPassCommands){
+        cmd->operator()();
+    }
+
+    VK_CALL vkCmdEndRenderPass(m_present.commandBuffer);
+
+    VK_CALL_ASSERT(vkEndCommandBuffer(m_present.commandBuffer)) {
+        throw std::runtime_error("failed to record command buffer!");
+    }
+
+    //updates dirty buffers
+    if (!m_dirtyUniformBuffers.empty()) {
+        std::vector<std::shared_ptr<VulkanUniformBuffer>> dirtyBuffers;
+        for (auto &buffer : m_dirtyUniformBuffers) {
+            buffer->flush(m_drawInfo.imageIndex);
+
+            //if the buffer is still dirty, we want to maintain it on the dirt buffers vector
+            if (buffer->is_dirty()) {
+                dirtyBuffers.emplace_back(buffer);
+            }
+        }
+        //swaps the old buffer vector with the new one
+        std::swap(m_dirtyUniformBuffers, dirtyBuffers);
+    }
+
+    m_firstPassCommands.clear();
+    m_secondPassCommands.clear();
+    m_drawInitialized = false;
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = {m_imageAvailableSemaphores[m_currentFrame]};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_commandBuffers[m_drawInfo.imageIndex];
+
+    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_currentFrame]};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    VK_CALL vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
+
+    VK_CALL_ASSERT(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrame])) {
+        throw std::runtime_error("failed to submit draw_vertices command buffer!");
+    }
+}
+
+void VulkanContext::handle_begin_draw_offscreen(std::shared_ptr<RenderTarget> renderTarget) {
+
+    auto vkRenderTarget = std::static_pointer_cast<VulkanRenderTarget>(renderTarget);
+
+    m_recordingFirstPass = true;
+
+    auto cmd = std::make_shared<VulkanCommandBeginRenderPass>(
+            m_present.commandBuffer,
+            vkRenderTarget->get_render_pass(),
+            vkRenderTarget->get_framebuffer(),
+            vkRenderTarget->get_extent()
+            );
+    //can only ever be on the first pass
+    m_firstPassCommands.emplace_back(cmd);
+}
+
+void VulkanContext::handle_end_draw_offscreen() {
+
+    auto cmd = std::make_shared<VulkanCommandEndRenderPass>(m_present.commandBuffer);
+
+    //can only ever be on the first pass
+    m_firstPassCommands.emplace_back(cmd);
+
+    m_recordingFirstPass = false;
+}
+
+void VulkanContext::refresh() {
+
+    VkPresentInfoKHR presentInfo = {};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+    VkSemaphore waitSemaphores[] = {m_renderFinishedSemaphores[m_currentFrame]};
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = waitSemaphores;
+
+    VkSwapchainKHR swapChains[] = {m_present.swapchain};
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &m_drawInfo.imageIndex;
+
+    VK_CALL
+    VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+
+
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_windowResized) {
+        m_windowResized = false;
+        recreate_swapchain();
+
+    } else if (result != VK_SUCCESS) {
+        throw std::runtime_error("failed to present swapchain image!");
+    }
+
+    m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 
@@ -1079,11 +1324,10 @@ VkResult CreateDebugUtilsMessengerEXT(VkInstance instance,
                                       const VkAllocationCallbacks *pAllocator,
                                       VkDebugUtilsMessengerEXT *pCallback) {
 
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pCallback);
-    }
-    else {
+    } else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
@@ -1092,7 +1336,8 @@ VkResult CreateDebugUtilsMessengerEXT(VkInstance instance,
 void DestroyDebugUtilsMessengerEXT(VkInstance instance,
                                    VkDebugUtilsMessengerEXT callback,
                                    const VkAllocationCallbacks *pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance,
+                                                                            "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, callback, pAllocator);
     }

@@ -1,44 +1,143 @@
-
+#include "eagle/renderer/vulkan/spirv_reflect.h"
 #include "eagle/renderer/vulkan/VulkanShader.h"
+#include "eagle/renderer/vulkan/VulkanShaderCompiler.h"
 #include "eagle/renderer/ShaderItemLayout.h"
 #include "eagle/core/Log.h"
 
 #include <fstream>
 
 
+
 _EAGLE_BEGIN
 
 VulkanShader::VulkanShader(const std::string& vertFileName, const std::string& fragFileName, const VulkanShaderCreateInfo& createInfo) :
-    Shader(vertFileName, fragFileName),
     m_cleared(true),
-    m_createInfo(createInfo){
+    m_info(createInfo){
+
+    m_vertShaderCode = VulkanShaderCompiler::compile_glsl(PROJECT_ROOT + vertFileName);
+    m_fragShaderCode = VulkanShaderCompiler::compile_glsl(PROJECT_ROOT + fragFileName);
+
     create_descriptor_set_layout();
     create_pipeline();
 }
 
 VulkanShader::~VulkanShader() {
-    VK_CALL vkDestroyDescriptorSetLayout(m_createInfo.device, m_descriptorSetLayout, nullptr);
     cleanup_pipeline();
+    VK_CALL vkDestroyPipelineLayout(m_info.device, m_pipelineLayout, nullptr);
+    VK_CALL vkDestroyDescriptorSetLayout(m_info.device, m_descriptorSetLayout, nullptr);
 }
 
 void VulkanShader::create_descriptor_set_layout() {
 
-    m_layoutBindings.emplace_back(create_descriptor_set_layout_binding(
-            0,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            1,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            nullptr
-    ));
-    m_uniformLayouts.insert(std::map< std::string, ShaderItemLayout>::value_type ( "mvp", ShaderItemLayout({SHADER_ITEM_COMPONENT_MAT4}) ));
+    SpvReflectShaderModule vertexShaderReflection, fragmentShaderReflection;
+    SPV_REFLECT_ASSERT(spvReflectCreateShaderModule(m_vertShaderCode.size() * sizeof(unsigned int), m_vertShaderCode.data(), &vertexShaderReflection));
+    SPV_REFLECT_ASSERT(spvReflectCreateShaderModule(m_fragShaderCode.size() * sizeof(unsigned int), m_fragShaderCode.data(), &fragmentShaderReflection));
+
+    std::map<uint32_t, VkDescriptorSetLayoutBinding> descriptorBindingsMap;
+
+    auto add_descriptor_bindings_from_shader_stage = [&](const SpvReflectShaderModule* shaderReflectionModule, const VkShaderStageFlags shaderStage) {
+
+        uint32_t descriptorBindingCount = 0;
+        SPV_REFLECT_ASSERT(spvReflectEnumerateDescriptorBindings(shaderReflectionModule, &descriptorBindingCount, nullptr));
+
+        if (descriptorBindingCount > 0) {
+
+            std::vector<SpvReflectDescriptorBinding*> reflectionDescriptorBindings(descriptorBindingCount);
+
+            SPV_REFLECT_ASSERT(spvReflectEnumerateDescriptorBindings(shaderReflectionModule, &descriptorBindingCount, reflectionDescriptorBindings.data()));
+
+            //Sort by binding so we can easily check if the binding has already been added by a previous shader stage
+            std::sort(std::begin(reflectionDescriptorBindings), std::end(reflectionDescriptorBindings),
+                    [](const SpvReflectDescriptorBinding* a, const SpvReflectDescriptorBinding* b)
+                      {
+                          return a->binding < b->binding;
+                      });
+
+            for (auto& reflectedDescriptorBinding : reflectionDescriptorBindings){
+
+                auto existingBinding = descriptorBindingsMap.find(reflectedDescriptorBinding->binding);
+                if (existingBinding != descriptorBindingsMap.end()){
+                    //If this binding already exists (from a previous shader stage), append this ShaderStages flag to it
+                    existingBinding->second.stageFlags |= shaderStage;
+                }
+                else { //Otherwise a new binding needs to be added
+
+                    VkDescriptorSetLayoutBinding descriptorBinding = {};
+                    descriptorBinding.binding = reflectedDescriptorBinding->binding;
+                    descriptorBinding.descriptorType = reflectedDescriptorBinding->descriptor_type;
+                    descriptorBinding.descriptorCount = 1; //TODO:
+                    descriptorBinding.stageFlags = shaderStage;
+
+                    descriptorBindingsMap.emplace(descriptorBinding.binding, descriptorBinding);
+
+                    //Also store our reflection data, keyed by binding name (maybe in the future)
+                    //DescriptorBindingsReflection.emplace(std::string(ReflectionDescriptorBinding->name), *ReflectionDescriptorBinding);
+                }
+            }
+        }
+    };
+
+    add_descriptor_bindings_from_shader_stage(&vertexShaderReflection, VK_SHADER_STAGE_VERTEX_BIT);
+    add_descriptor_bindings_from_shader_stage(&fragmentShaderReflection, VK_SHADER_STAGE_FRAGMENT_BIT);
+
+    for (auto& it : descriptorBindingsMap){
+        m_layoutBindings.emplace_back(it.second);
+    }
+    //-----------------------------
+
+
+    //vertex input-----------------------------
+    uint32_t vertexInputCount = 0;
+    SPV_REFLECT_ASSERT(spvReflectEnumerateInputVariables(&vertexShaderReflection, &vertexInputCount, nullptr));
+    if (vertexInputCount > 0){
+
+        std::vector<SpvReflectInterfaceVariable*> vertexInputs(vertexInputCount);
+        SPV_REFLECT_ASSERT(spvReflectEnumerateInputVariables(&vertexShaderReflection, &vertexInputCount, vertexInputs.data()));
+
+        std::sort(std::begin(vertexInputs), std::end(vertexInputs),
+                  [](const SpvReflectInterfaceVariable* a, const SpvReflectInterfaceVariable* b){
+                      return a->location < b->location;
+                  });
+
+        uint32_t offset = 0;
+
+        //Individual elements of our vertices
+        m_inputAttributes.clear();
+        for (auto& input : vertexInputs) {
+            VkVertexInputAttributeDescription attribute;
+            attribute.binding = 0; //TODO: Allow multiple vertex buffer bindings
+            attribute.location = input->location;
+            attribute.format   = input->format;
+            attribute.offset = offset;
+
+            m_inputAttributes.push_back(attribute);
+            offset += spv_reflect::FormatSize(attribute.format);
+        }
+
+        //Represents one type of Vertex for an input vertex buffer
+        m_inputBinding.binding = 0;
+        m_inputBinding.stride = offset;
+        m_inputBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    }
+
 
     VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo = {};
     descriptorSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     descriptorSetLayoutInfo.bindingCount = static_cast<uint32_t>(m_layoutBindings.size());
     descriptorSetLayoutInfo.pBindings = m_layoutBindings.data();
 
-    VK_CALL_ASSERT(vkCreateDescriptorSetLayout(m_createInfo.device, &descriptorSetLayoutInfo, nullptr, &m_descriptorSetLayout)) {
+    VK_CALL_ASSERT(vkCreateDescriptorSetLayout(m_info.device, &descriptorSetLayoutInfo, nullptr, &m_descriptorSetLayout)) {
         throw std::runtime_error("failed to create descriptor set layout!");
+    }
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &m_descriptorSetLayout;
+
+    VK_CALL_ASSERT(vkCreatePipelineLayout(m_info.device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout)) {
+        throw std::runtime_error("failed to create pipeline layout!");
     }
 }
 
@@ -62,33 +161,32 @@ void VulkanShader::create_pipeline() {
 
     VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
 
-    ShaderItemLayout vertexLayout({SHADER_ITEM_COMPONENT_VEC3, SHADER_ITEM_COMPONENT_VEC3});
-    VkVertexInputBindingDescription inputBinding = get_binding_description(vertexLayout);
-    std::vector<VkVertexInputAttributeDescription> inputAttributes = get_attribute_descriptions(vertexLayout);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexBindingDescriptionCount = 1;
-    vertexInputInfo.pVertexBindingDescriptions = &inputBinding;
-    vertexInputInfo.vertexAttributeDescriptionCount = inputAttributes.size();
-    vertexInputInfo.pVertexAttributeDescriptions = inputAttributes.data();
+    vertexInputInfo.pVertexBindingDescriptions = &m_inputBinding;
+    vertexInputInfo.vertexAttributeDescriptionCount = m_inputAttributes.size();
+    vertexInputInfo.pVertexAttributeDescriptions = m_inputAttributes.data();
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     inputAssembly.primitiveRestartEnable = VK_FALSE;
 
+
+    VkExtent2D extent = *m_info.pExtent;
     VkViewport viewport = {};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = (float) m_createInfo.extent.width;
-    viewport.height = (float) m_createInfo.extent.height;
+    viewport.width = (float) extent.width;
+    viewport.height = (float) extent.height;
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor = {};
     scissor.offset = {0, 0};
-    scissor.extent = m_createInfo.extent;
+    scissor.extent = extent;
 
     VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -116,6 +214,18 @@ void VulkanShader::create_pipeline() {
     colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     colorBlendAttachment.blendEnable = VK_FALSE;
 
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.minDepthBounds = 0.0f; // Optional
+    depthStencil.maxDepthBounds = 1.0f; // Optional
+    depthStencil.stencilTestEnable = VK_FALSE;
+    depthStencil.front = {}; // Optional
+    depthStencil.back = {}; // Optional
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlending.logicOpEnable = VK_FALSE;
@@ -127,15 +237,6 @@ void VulkanShader::create_pipeline() {
     colorBlending.blendConstants[2] = 0.0f;
     colorBlending.blendConstants[3] = 0.0f;
 
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &m_descriptorSetLayout;
-
-    VK_CALL_ASSERT(vkCreatePipelineLayout(m_createInfo.device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout)) {
-        throw std::runtime_error("failed to create pipeline layout!");
-    }
 
     VkGraphicsPipelineCreateInfo pipelineInfo = {};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -147,17 +248,18 @@ void VulkanShader::create_pipeline() {
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
     pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.renderPass = m_createInfo.renderPass;
+    pipelineInfo.renderPass = *m_info.pRenderPass;
     pipelineInfo.subpass = 0;
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-    VK_CALL_ASSERT(vkCreateGraphicsPipelines(m_createInfo.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_graphicsPipeline)) {
+    VK_CALL_ASSERT(vkCreateGraphicsPipelines(m_info.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_graphicsPipeline)) {
         throw std::runtime_error("failed to create graphics pipeline!");
     }
 
-    VK_CALL vkDestroyShaderModule(m_createInfo.device, fragShaderModule, nullptr);
-    VK_CALL vkDestroyShaderModule(m_createInfo.device, vertShaderModule, nullptr);
+    VK_CALL vkDestroyShaderModule(m_info.device, fragShaderModule, nullptr);
+    VK_CALL vkDestroyShaderModule(m_info.device, vertShaderModule, nullptr);
 
     m_cleared = false;
 
@@ -166,8 +268,7 @@ void VulkanShader::create_pipeline() {
 
 void VulkanShader::cleanup_pipeline(){
     if (m_cleared){ return; }
-    VK_CALL vkDestroyPipeline(m_createInfo.device, m_graphicsPipeline, nullptr);
-    VK_CALL vkDestroyPipelineLayout(m_createInfo.device, m_pipelineLayout, nullptr);
+    VK_CALL vkDestroyPipeline(m_info.device, m_graphicsPipeline, nullptr);
     m_cleared = true;
 }
 
@@ -225,17 +326,17 @@ VkFormat VulkanShader::component_format(const SHADER_ITEM_COMPONENT &component) 
 }
 
 
-VkShaderModule VulkanShader::create_shader_module(const std::vector<char> &code) {
+VkShaderModule VulkanShader::create_shader_module(const std::vector<uint32_t> &code) {
 
     EG_CORE_TRACE("Creating shader module!");
 
     VkShaderModuleCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    createInfo.codeSize = code.size() * sizeof(uint32_t);
+    createInfo.pCode = code.data();
 
     VkShaderModule shaderModule;
-    VK_CALL_ASSERT(vkCreateShaderModule(m_createInfo.device, &createInfo, nullptr, &shaderModule)) {
+    VK_CALL_ASSERT(vkCreateShaderModule(m_info.device, &createInfo, nullptr, &shaderModule)) {
         throw std::runtime_error("failed to create shader module!");
     }
 
@@ -250,17 +351,6 @@ VkPipelineLayout& VulkanShader::get_layout() {
     return m_pipelineLayout;
 }
 
-void VulkanShader::bind() {
-    VK_CALL vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline);
-}
-
-void VulkanShader::bind_command_buffer(VkCommandBuffer cmd) {
-    m_cmd = cmd;
-}
-
-void VulkanShader::compile() {
-    //TODO -- implement glslang compiler
-}
 
 const std::vector<VkDescriptorSetLayoutBinding> &VulkanShader::get_descriptor_set_layout_bindings() {
     return m_layoutBindings;

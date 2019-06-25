@@ -20,20 +20,26 @@ class VulkanUniformBuffer : public UniformBuffer {
 
 public:
 
-    explicit VulkanUniformBuffer(VulkanUniformBufferCreateInfo &createInfo, const ShaderItemLayout& layout);
+    explicit VulkanUniformBuffer(VulkanUniformBufferCreateInfo &createInfo, size_t size);
     virtual ~VulkanUniformBuffer();
 
-    virtual void flush(void *data, uint32_t bufferIndex) override;
-    virtual size_t size() override;
+    virtual void flush(uint32_t bufferIndex) override;
     inline std::vector<std::shared_ptr<VulkanBuffer>>& get_buffers() { return m_buffers; }
+
     void create_uniform_buffer();
     void cleanup();
 
+    void upload_data(void* data);
+    bool is_dirty();
+
 private:
 
-    std::vector<std::shared_ptr<VulkanBuffer>> m_buffers;
     VulkanUniformBufferCreateInfo m_info;
+    std::vector<std::shared_ptr<VulkanBuffer>> m_buffers;
+    std::vector<uint32_t> m_dirtyBuffers;
+    void* m_data = nullptr;
     bool m_cleared = true;
+
 };
 
 _EAGLE_END

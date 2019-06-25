@@ -1,13 +1,13 @@
 #include "eagle/renderer/vulkan/VulkanDescriptorSet.h"
-
-
+#include "eagle/renderer/vulkan/VulkanImage.h"
 
 _EAGLE_BEGIN
 
 VulkanDescriptorSet::VulkanDescriptorSet(std::shared_ptr<VulkanShader> shader,
                                          const std::vector<std::shared_ptr<VulkanUniformBuffer>> &uniformBuffers,
+                                         const std::vector<std::shared_ptr<VulkanImage>> &images,
                                          VulkanDescriptorSetCreateInfo createInfo) :
-    m_shader(shader), m_uniformBuffers(uniformBuffers), m_info(createInfo){
+    m_shader(shader), m_uniformBuffers(uniformBuffers), m_images(images), m_info(createInfo){
     create_descriptor_pool();
     create_descriptor_sets();
 }
@@ -54,8 +54,9 @@ void VulkanDescriptorSet::create_descriptor_sets() {
         throw std::runtime_error("failed to allocate descriptor sets!");
     }
 
-    std::vector<VkDescriptorBufferInfo> bufferInfos = {};
-    bufferInfos.resize(m_uniformBuffers.size());
+    std::vector<VkDescriptorSetLayoutBinding> descriptorBindings = m_shader.lock()->get_descriptor_set_layout_bindings();
+    std::vector<VkDescriptorBufferInfo> bufferInfos(m_uniformBuffers.size());
+    std::vector<VkDescriptorImageInfo> imageInfos(m_images.size());
     for (size_t i = 0; i < m_descriptorSets.size(); i++) {
 
         for (size_t j = 0; j < bufferInfos.size(); j++) {
@@ -64,30 +65,37 @@ void VulkanDescriptorSet::create_descriptor_sets() {
             bufferInfos[j].range = m_uniformBuffers[j]->size();
         }
 
+        for (size_t j = 0; j < imageInfos.size(); j++){
+            imageInfos[j].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfos[j].imageView = m_images[j]->view;
+            imageInfos[j].sampler = m_images[j]->sampler;
+        }
+
         std::vector<VkWriteDescriptorSet> descriptorWrite = {};
 
-        descriptorWrite.resize(bufferInfos.size());
-        for (size_t j = 0; j < bufferInfos.size(); j++) {
+        descriptorWrite.resize(bufferInfos.size() + imageInfos.size());
+        size_t bufferIndex = 0;
+        size_t imageIndex = 0;
+        for (size_t j = 0; j < descriptorWrite.size(); j++) {
             descriptorWrite[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrite[j].dstSet = m_descriptorSets[i];
             descriptorWrite[j].dstBinding = j;
             descriptorWrite[j].dstArrayElement = 0;
-            descriptorWrite[j].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite[j].descriptorType = descriptorBindings[j].descriptorType;
             descriptorWrite[j].descriptorCount = 1;
-            descriptorWrite[j].pBufferInfo = &bufferInfos[j];
+            if (descriptorWrite[j].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER){
+                descriptorWrite[j].pBufferInfo = &bufferInfos[bufferIndex];
+                bufferIndex++;
+            }
+            else if (descriptorWrite[j].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER){
+                descriptorWrite[j].pImageInfo = &imageInfos[imageIndex];
+                imageIndex++;
+            }
         }
 
         VK_CALL vkUpdateDescriptorSets(m_info.device, static_cast<uint32_t>(descriptorWrite.size()), descriptorWrite.data(), 0, nullptr);
     }
     m_cleared = false;
-}
-
-void VulkanDescriptorSet::bind() {
-    VK_CALL vkCmdBindDescriptorSets(m_drawInfo.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shader.lock()->get_layout(), 0, 1, &m_descriptorSets[m_drawInfo.bufferIndex], 0, nullptr);
-}
-
-void VulkanDescriptorSet::set_draw_info(VulkanDescriptorSetDrawInfo drawInfo) {
-    m_drawInfo = drawInfo;
 }
 
 void VulkanDescriptorSet::cleanup() {
